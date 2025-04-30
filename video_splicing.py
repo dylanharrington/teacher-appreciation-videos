@@ -62,8 +62,9 @@ def create_concat_file(video_files, concat_file_path):
 
 def concatenate_videos(video_files, output_file, temp_dir):
     """
-    Concatenate video files using FFmpeg.
-    Ensures QuickTime compatibility with proper encoding settings.
+    Concatenate video files using FFmpeg with consistent settings.
+    Since all videos have been normalized with the same audio settings,
+    we can safely concatenate them without audio issues.
     """
     if not video_files:
         logging.warning(f"No videos to concatenate for {output_file}")
@@ -73,21 +74,16 @@ def concatenate_videos(video_files, output_file, temp_dir):
     concat_file = os.path.join(temp_dir, f"concat_{os.path.basename(output_file)}.txt")
     create_concat_file(video_files, concat_file)
     
-    # Use the concat demuxer with QuickTime-compatible settings
+    # Use the concat demuxer with consistent settings
     cmd = [
         'ffmpeg',
         '-y',
         '-f', 'concat',
         '-safe', '0',
         '-i', concat_file,
-        '-c:v', 'libx264',
-        '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
-        '-profile:v', 'baseline',  # Use baseline profile for better compatibility
-        '-level', '3.0',
+        '-c:v', 'copy',  # Copy video stream to preserve quality
+        '-c:a', 'copy',  # Copy audio stream (already normalized)
         '-movflags', '+faststart',  # Optimize for streaming
-        '-c:a', 'aac',
-        '-strict', 'experimental',
-        '-shortest',  # Use the shortest input as reference
         output_file
     ]
     
@@ -98,12 +94,39 @@ def concatenate_videos(video_files, output_file, temp_dir):
         return True
     except subprocess.CalledProcessError as e:
         logging.error(f"FFmpeg encoding error: {e.stderr.decode() if e.stderr else str(e)}")
-        return False
+        # If the simple concatenation fails, try with minimal re-encoding
+        try:
+            logging.info("Trying alternative concatenation method...")
+            alt_cmd = [
+                'ffmpeg',
+                '-y',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', concat_file,
+                '-c:v', 'libx264',  # Re-encode video
+                '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
+                '-profile:v', 'baseline',  # Use baseline profile for better compatibility
+                '-level', '3.0',
+                '-c:a', 'aac',  # Convert audio to AAC
+                '-b:a', '256k',  # Use a high bitrate for good audio quality
+                '-ar', '48000',  # Standard audio sample rate
+                '-ac', '2',      # Stereo audio (2 channels)
+                '-movflags', '+faststart',  # Optimize for streaming
+                output_file
+            ]
+            logging.info(f"Running alternative FFmpeg command: {' '.join(alt_cmd)}")
+            subprocess.run(alt_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logging.info(f"Successfully created {output_file} with alternative method")
+            return True
+        except subprocess.CalledProcessError as e2:
+            logging.error(f"Alternative method also failed: {e2.stderr.decode() if e2.stderr else str(e2)}")
+            return False
 
 def normalize_videos(video_files, temp_dir):
     """
     Normalize videos to ensure they can be concatenated properly.
     Prioritizes portrait mode to make portrait videos take up most of the space.
+    Ensures consistent audio settings to avoid audio issues.
     Returns a list of normalized video paths with QuickTime compatibility.
     """
     normalized_videos = []
@@ -117,7 +140,8 @@ def normalize_videos(video_files, temp_dir):
         base_name = os.path.basename(video_file)
         normalized_path = os.path.join(temp_dir, f"norm_{i}_{base_name}")
         
-        # Normalize all videos to the same resolution and frame rate with QuickTime compatibility
+        # Normalize all videos to the same resolution, frame rate, and audio settings
+        # Use consistent audio settings to avoid issues during concatenation
         cmd = [
             'ffmpeg',
             '-y',
@@ -132,7 +156,9 @@ def normalize_videos(video_files, temp_dir):
             '-preset', 'medium',
             '-crf', '23',
             '-c:a', 'aac',
-            '-b:a', '128k',
+            '-b:a', '256k',  # Higher audio bitrate for better quality
+            '-ar', '48000',  # Consistent audio sample rate
+            '-ac', '2',      # Stereo audio (2 channels)
             normalized_path
         ]
         
@@ -154,6 +180,9 @@ def normalize_videos(video_files, temp_dir):
                     '-level', '3.0',
                     '-movflags', '+faststart',  # Optimize for streaming
                     '-c:a', 'aac',
+                    '-b:a', '256k',  # Higher audio bitrate for better quality
+                    '-ar', '48000',  # Consistent audio sample rate
+                    '-ac', '2',      # Stereo audio (2 channels)
                     normalized_path
                 ]
                 subprocess.run(simple_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -167,12 +196,14 @@ def normalize_videos(video_files, temp_dir):
 
 def add_transitions(videos, temp_dir):
     """
-    Add simple fade transitions between videos in a QuickTime-compatible way.
+    Add visual fade transitions between videos.
+    Since all videos have been normalized with consistent audio settings,
+    we can safely add transitions without audio issues.
     """
     if len(videos) <= 1:
         return videos
     
-    # Process each video to add fade in/out
+    # Process each video to add fade in/out (video only)
     processed_videos = []
     
     for i, video in enumerate(videos):
@@ -198,20 +229,18 @@ def add_transitions(videos, temp_dir):
                 '-y',
                 '-i', video,
                 '-vf', f'fade=t=in:st=0:d=0.5,fade=t=out:st={max(0, duration-0.5)}:d=0.5',
-                '-af', f'afade=t=in:st=0:d=0.5,afade=t=out:st={max(0, duration-0.5)}:d=0.5',
                 '-c:v', 'libx264',
                 '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
                 '-profile:v', 'baseline',  # Use baseline profile for better compatibility
                 '-level', '3.0',
                 '-movflags', '+faststart',  # Optimize for streaming
-                '-c:a', 'aac',
-                '-strict', 'experimental',
+                '-c:a', 'copy',  # Just copy the audio without modifying it
                 fade_file
             ]
             
             subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             processed_videos.append(fade_file)
-            logging.info(f"Added fade effects to video {i}")
+            logging.info(f"Added visual fade effects to video {i}")
         except (subprocess.CalledProcessError, ValueError) as e:
             logging.error(f"Failed to add fade effects: {str(e)}")
             # If processing fails, use the original video
