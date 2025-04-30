@@ -16,6 +16,7 @@ from collections import defaultdict
 import shutil
 import logging
 import shlex
+import tempfile
 
 # Configure logging
 logging.basicConfig(
@@ -60,7 +61,10 @@ def create_concat_file(video_files, concat_file_path):
             f.write(f"file '{escaped_path}'\n")
 
 def concatenate_videos(video_files, output_file, temp_dir):
-    """Concatenate video files using FFmpeg."""
+    """
+    Concatenate video files using FFmpeg.
+    Ensures QuickTime compatibility with proper encoding settings.
+    """
     if not video_files:
         logging.warning(f"No videos to concatenate for {output_file}")
         return False
@@ -69,7 +73,7 @@ def concatenate_videos(video_files, output_file, temp_dir):
     concat_file = os.path.join(temp_dir, f"concat_{os.path.basename(output_file)}.txt")
     create_concat_file(video_files, concat_file)
     
-    # Use the concat demuxer with re-encoding
+    # Use the concat demuxer with QuickTime-compatible settings
     cmd = [
         'ffmpeg',
         '-y',
@@ -77,6 +81,10 @@ def concatenate_videos(video_files, output_file, temp_dir):
         '-safe', '0',
         '-i', concat_file,
         '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
+        '-profile:v', 'baseline',  # Use baseline profile for better compatibility
+        '-level', '3.0',
+        '-movflags', '+faststart',  # Optimize for streaming
         '-c:a', 'aac',
         '-strict', 'experimental',
         '-shortest',  # Use the shortest input as reference
@@ -96,7 +104,7 @@ def normalize_videos(video_files, temp_dir):
     """
     Normalize videos to ensure they can be concatenated properly.
     Prioritizes portrait mode to make portrait videos take up most of the space.
-    Returns a list of normalized video paths.
+    Returns a list of normalized video paths with QuickTime compatibility.
     """
     normalized_videos = []
     
@@ -109,7 +117,7 @@ def normalize_videos(video_files, temp_dir):
         base_name = os.path.basename(video_file)
         normalized_path = os.path.join(temp_dir, f"norm_{i}_{base_name}")
         
-        # Normalize all videos to the same resolution and frame rate
+        # Normalize all videos to the same resolution and frame rate with QuickTime compatibility
         cmd = [
             'ffmpeg',
             '-y',
@@ -117,6 +125,10 @@ def normalize_videos(video_files, temp_dir):
             '-vf', f'scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2',
             '-r', str(target_fps),
             '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
+            '-profile:v', 'baseline',  # Use baseline profile for better compatibility
+            '-level', '3.0',
+            '-movflags', '+faststart',  # Optimize for streaming
             '-preset', 'medium',
             '-crf', '23',
             '-c:a', 'aac',
@@ -130,13 +142,17 @@ def normalize_videos(video_files, temp_dir):
             logging.info(f"Normalized {video_file} to {normalized_path}")
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to normalize {video_file}: {e.stderr.decode() if e.stderr else str(e)}")
-            # If normalization fails, try a simpler approach
+            # If normalization fails, try a simpler approach with QuickTime compatibility
             try:
                 simple_cmd = [
                     'ffmpeg',
                     '-y',
                     '-i', video_file,
                     '-c:v', 'libx264',
+                    '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
+                    '-profile:v', 'baseline',  # Use baseline profile for better compatibility
+                    '-level', '3.0',
+                    '-movflags', '+faststart',  # Optimize for streaming
                     '-c:a', 'aac',
                     normalized_path
                 ]
@@ -148,6 +164,60 @@ def normalize_videos(video_files, temp_dir):
                 continue
     
     return normalized_videos
+
+def add_transitions(videos, temp_dir):
+    """
+    Add simple fade transitions between videos in a QuickTime-compatible way.
+    """
+    if len(videos) <= 1:
+        return videos
+    
+    # Process each video to add fade in/out
+    processed_videos = []
+    
+    for i, video in enumerate(videos):
+        # Get video duration
+        duration_cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'csv=p=0',
+            video
+        ]
+        
+        try:
+            duration = float(subprocess.run(duration_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip())
+            
+            # Create a version with fade in/out
+            fade_file = os.path.join(temp_dir, f"fade_{i}.mp4")
+            
+            # Add fade in at the beginning and fade out at the end
+            # Using fixed values instead of "outpoint" which was causing issues
+            cmd = [
+                'ffmpeg',
+                '-y',
+                '-i', video,
+                '-vf', f'fade=t=in:st=0:d=0.5,fade=t=out:st={max(0, duration-0.5)}:d=0.5',
+                '-af', f'afade=t=in:st=0:d=0.5,afade=t=out:st={max(0, duration-0.5)}:d=0.5',
+                '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
+                '-profile:v', 'baseline',  # Use baseline profile for better compatibility
+                '-level', '3.0',
+                '-movflags', '+faststart',  # Optimize for streaming
+                '-c:a', 'aac',
+                '-strict', 'experimental',
+                fade_file
+            ]
+            
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            processed_videos.append(fade_file)
+            logging.info(f"Added fade effects to video {i}")
+        except (subprocess.CalledProcessError, ValueError) as e:
+            logging.error(f"Failed to add fade effects: {str(e)}")
+            # If processing fails, use the original video
+            processed_videos.append(video)
+    
+    return processed_videos
 
 def process_videos(input_dir, output_dir, temp_dir, normalize=True):
     """
@@ -186,11 +256,14 @@ def process_videos(input_dir, output_dir, temp_dir, normalize=True):
         else:
             processed_videos = videos
         
+        # Add transitions between videos (faster method)
+        videos_with_transitions = add_transitions(processed_videos, temp_dir)
+        
         # Create output filename
         output_file = os.path.join(output_dir, f"{teacher_name}_appreciation.mp4")
         
         # Concatenate videos
-        success = concatenate_videos(processed_videos, output_file, temp_dir)
+        success = concatenate_videos(videos_with_transitions, output_file, temp_dir)
         
         if success:
             results.append({
