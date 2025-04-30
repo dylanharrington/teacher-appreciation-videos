@@ -2,6 +2,29 @@
 
 This tool combines student-submitted videos for teacher appreciation into single videos for each teacher.
 
+## Repository Setup
+
+This project is set up as a Git repository with appropriate .gitignore settings. The repository structure:
+
+```
+video-gen/
+├── .git/               # Git repository
+├── .gitignore          # Git ignore rules
+├── README.md           # This documentation
+├── video_splicing.py   # Main processing script
+├── splice_videos.sh    # User-friendly shell script
+├── generate_test_videos.py # Test video generator
+├── input/              # Directory for input videos (ignored by Git)
+├── output/             # Directory for output videos (ignored by Git)
+└── temp/               # Directory for temporary files (ignored by Git)
+```
+
+The .gitignore file is configured to exclude:
+- Input and output video directories (to avoid storing large binary files)
+- Temporary processing files
+- Common Python artifacts
+- OS-specific files like .DS_Store
+
 ## Requirements
 
 - Python 3.6+
