@@ -1,0 +1,55 @@
+# Directories
+/input/
+/output/
+/temp/
+__pycache__/
+
+# Python
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Video files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.m4v
+*.wmv
+*.flv
+
+# FFmpeg concat files
+*.txt
