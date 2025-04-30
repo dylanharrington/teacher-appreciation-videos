@@ -15,6 +15,7 @@ import argparse
 from collections import defaultdict
 import shutil
 import logging
+import shlex
 
 # Configure logging
 logging.basicConfig(
@@ -53,6 +54,9 @@ def create_concat_file(video_files, concat_file_path):
         for video_file in video_files:
             # Escape single quotes in the file path
             escaped_path = video_file.replace("'", "'\\''")
+            # Make sure we're using the absolute path to avoid path issues
+            if not os.path.isabs(escaped_path):
+                escaped_path = os.path.abspath(escaped_path)
             f.write(f"file '{escaped_path}'\n")
 
 def concatenate_videos(video_files, output_file, temp_dir):
@@ -65,14 +69,17 @@ def concatenate_videos(video_files, output_file, temp_dir):
     concat_file = os.path.join(temp_dir, f"concat_{os.path.basename(output_file)}.txt")
     create_concat_file(video_files, concat_file)
     
-    # Build the FFmpeg command
+    # Use the concat demuxer with re-encoding
     cmd = [
         'ffmpeg',
-        '-y',  # Overwrite output file if it exists
+        '-y',
         '-f', 'concat',
         '-safe', '0',
         '-i', concat_file,
-        '-c', 'copy',  # Copy streams without re-encoding
+        '-c:v', 'libx264',
+        '-c:a', 'aac',
+        '-strict', 'experimental',
+        '-shortest',  # Use the shortest input as reference
         output_file
     ]
     
@@ -82,28 +89,8 @@ def concatenate_videos(video_files, output_file, temp_dir):
         logging.info(f"Successfully created {output_file}")
         return True
     except subprocess.CalledProcessError as e:
-        logging.error(f"FFmpeg error: {e.stderr.decode() if e.stderr else str(e)}")
-        
-        # If copy fails, try re-encoding
-        try:
-            logging.info("Trying with re-encoding...")
-            cmd = [
-                'ffmpeg',
-                '-y',
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', concat_file,
-                '-c:v', 'libx264',  # Use H.264 codec
-                '-c:a', 'aac',      # Use AAC for audio
-                '-strict', 'experimental',
-                output_file
-            ]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            logging.info(f"Successfully created {output_file} with re-encoding")
-            return True
-        except subprocess.CalledProcessError as e:
-            logging.error(f"FFmpeg re-encoding error: {e.stderr.decode() if e.stderr else str(e)}")
-            return False
+        logging.error(f"FFmpeg encoding error: {e.stderr.decode() if e.stderr else str(e)}")
+        return False
 
 def normalize_videos(video_files, temp_dir):
     """
@@ -112,55 +99,52 @@ def normalize_videos(video_files, temp_dir):
     """
     normalized_videos = []
     
+    # Standard resolution and frame rate for all videos
+    target_width = 1280
+    target_height = 720
+    target_fps = 30
+    
     for i, video_file in enumerate(video_files):
         base_name = os.path.basename(video_file)
         normalized_path = os.path.join(temp_dir, f"norm_{i}_{base_name}")
         
-        # Get video information
+        # Normalize all videos to the same resolution and frame rate
         cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,r_frame_rate',
-            '-of', 'csv=p=0',
-            video_file
+            'ffmpeg',
+            '-y',
+            '-i', video_file,
+            '-vf', f'scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2',
+            '-r', str(target_fps),
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '23',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            normalized_path
         ]
         
         try:
-            result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            info = result.stdout.decode().strip().split(',')
-            
-            if len(info) >= 3:
-                width, height, frame_rate = info
-                
-                # Normalize to 1080p at 30fps if needed
-                cmd = [
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            normalized_videos.append(normalized_path)
+            logging.info(f"Normalized {video_file} to {normalized_path}")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to normalize {video_file}: {e.stderr.decode() if e.stderr else str(e)}")
+            # If normalization fails, try a simpler approach
+            try:
+                simple_cmd = [
                     'ffmpeg',
                     '-y',
                     '-i', video_file,
-                    '-vf', f'scale=-1:min(1080,ih)',
-                    '-r', '30',
                     '-c:v', 'libx264',
-                    '-preset', 'medium',
-                    '-crf', '23',
                     '-c:a', 'aac',
-                    '-b:a', '128k',
                     normalized_path
                 ]
-                
-                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                subprocess.run(simple_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 normalized_videos.append(normalized_path)
-                logging.info(f"Normalized {video_file} to {normalized_path}")
-            else:
-                # If we can't get video info, just copy the file
-                shutil.copy(video_file, normalized_path)
-                normalized_videos.append(normalized_path)
-                logging.warning(f"Couldn't get video info for {video_file}, using original")
-        except subprocess.CalledProcessError:
-            # If normalization fails, use the original file
-            shutil.copy(video_file, normalized_path)
-            normalized_videos.append(normalized_path)
-            logging.warning(f"Failed to normalize {video_file}, using original")
+                logging.info(f"Simple conversion of {video_file} to {normalized_path}")
+            except subprocess.CalledProcessError:
+                logging.warning(f"All normalization attempts failed for {video_file}, skipping")
+                continue
     
     return normalized_videos
 
