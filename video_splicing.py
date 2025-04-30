@@ -95,13 +95,14 @@ def concatenate_videos(video_files, output_file, temp_dir):
 def normalize_videos(video_files, temp_dir):
     """
     Normalize videos to ensure they can be concatenated properly.
+    Prioritizes portrait mode to make portrait videos take up most of the space.
     Returns a list of normalized video paths.
     """
     normalized_videos = []
     
-    # Standard resolution and frame rate for all videos
-    target_width = 1280
-    target_height = 720
+    # Standard resolution and frame rate for all videos - using portrait orientation
+    target_width = 720
+    target_height = 1280
     target_fps = 30
     
     for i, video_file in enumerate(video_files):
