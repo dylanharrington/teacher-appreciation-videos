@@ -56,6 +56,14 @@ if [[ $NORMALIZE =~ ^[Nn] ]]; then
     NORMALIZE_FLAG="--no-normalize"
 fi
 
+# Ask about title cards
+read -p "Add title cards (teacher intro + student names)? [Y/n]: " TITLE_CARDS
+TITLE_CARDS=${TITLE_CARDS:-Y}
+TITLE_CARDS_FLAG=""
+if [[ $TITLE_CARDS =~ ^[Nn] ]]; then
+    TITLE_CARDS_FLAG="--no-title-cards"
+fi
+
 # Ask to keep temporary files
 read -p "Keep temporary files for debugging? [y/N]: " KEEP_TEMP
 KEEP_TEMP=${KEEP_TEMP:-N}
@@ -75,6 +83,7 @@ python3 "$SCRIPT_DIR/video_splicing.py" \
     --output "$OUTPUT_DIR" \
     --temp "$DEFAULT_TEMP_DIR" \
     $NORMALIZE_FLAG \
+    $TITLE_CARDS_FLAG \
     $KEEP_TEMP_FLAG
 
 # Check if the script ran successfully

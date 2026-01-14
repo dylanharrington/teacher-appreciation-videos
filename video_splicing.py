@@ -17,6 +17,8 @@ import shutil
 import logging
 import shlex
 import tempfile
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging
 logging.basicConfig(
@@ -26,6 +28,71 @@ logging.basicConfig(
 
 # Common video formats as of 2025
 VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv']
+
+# Number of parallel workers for video processing
+MAX_WORKERS = 4
+
+
+def print_progress(current, total, prefix="Progress", bar_length=40):
+    """Print a simple progress bar to the console."""
+    percent = current / total if total > 0 else 1
+    filled = int(bar_length * percent)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    sys.stdout.write(f"\r{prefix}: |{bar}| {current}/{total} ({percent*100:.0f}%)")
+    sys.stdout.flush()
+    if current == total:
+        print()  # New line when complete
+
+
+def create_title_card(text, output_path, duration=2.0, font_size=48, bg_color="black", text_color="white"):
+    """
+    Create a title card video with text using FFmpeg.
+    """
+    # Escape special characters for FFmpeg drawtext filter
+    escaped_text = text.replace("'", "'\\''").replace(":", "\\:")
+
+    cmd = [
+        'ffmpeg',
+        '-y',
+        '-f', 'lavfi',
+        '-i', f'color=c={bg_color}:s=720x1280:d={duration}:r=30',
+        '-f', 'lavfi',
+        '-i', f'anullsrc=r=48000:cl=stereo',
+        '-t', str(duration),
+        '-vf', f"drawtext=text='{escaped_text}':fontsize={font_size}:fontcolor={text_color}:x=(w-text_w)/2:y=(h-text_h)/2",
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',
+        '-profile:v', 'baseline',
+        '-level', '3.0',
+        '-c:a', 'aac',
+        '-b:a', '256k',
+        '-ar', '48000',
+        '-ac', '2',
+        '-movflags', '+faststart',
+        '-shortest',
+        output_path
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        logging.info(f"Created title card: {text}")
+        return output_path
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to create title card: {e.stderr.decode() if e.stderr else str(e)}")
+        return None
+
+
+def format_teacher_name(teacher_key):
+    """Convert teacher_first_teacher_last to 'Teacher First Last' format."""
+    parts = teacher_key.split('_')
+    if len(parts) >= 2:
+        return f"{parts[0].title()} {parts[1].title()}"
+    return teacher_key.replace('_', ' ').title()
+
+
+def format_student_name(student_name):
+    """Format student name for display."""
+    return student_name.replace('_', ' ').title()
 
 def parse_filename(filename):
     """
@@ -122,92 +189,121 @@ def concatenate_videos(video_files, output_file, temp_dir):
             logging.error(f"Alternative method also failed: {e2.stderr.decode() if e2.stderr else str(e2)}")
             return False
 
-def normalize_videos(video_files, temp_dir):
+def normalize_single_video(args):
     """
-    Normalize videos to ensure they can be concatenated properly.
-    Prioritizes portrait mode to make portrait videos take up most of the space.
-    Ensures consistent audio settings to avoid audio issues.
-    Returns a list of normalized video paths with QuickTime compatibility.
+    Normalize a single video file. Used for parallel processing.
+    Returns (index, normalized_path) or (index, None) on failure.
     """
-    normalized_videos = []
-    
+    i, video_file, temp_dir = args
+
     # Standard resolution and frame rate for all videos - using portrait orientation
     target_width = 720
     target_height = 1280
     target_fps = 30
-    
-    for i, video_file in enumerate(video_files):
-        base_name = os.path.basename(video_file)
-        normalized_path = os.path.join(temp_dir, f"norm_{i}_{base_name}")
-        
-        # Normalize all videos to the same resolution, frame rate, and audio settings
-        # Use consistent audio settings to avoid issues during concatenation
-        cmd = [
-            'ffmpeg',
-            '-y',
-            '-i', video_file,
-            '-vf', f'scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2',
-            '-r', str(target_fps),
-            '-c:v', 'libx264',
-            '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
-            '-profile:v', 'baseline',  # Use baseline profile for better compatibility
-            '-level', '3.0',
-            '-movflags', '+faststart',  # Optimize for streaming
-            '-preset', 'medium',
-            '-crf', '23',
-            '-c:a', 'aac',
-            '-b:a', '256k',  # Higher audio bitrate for better quality
-            '-ar', '48000',  # Consistent audio sample rate
-            '-ac', '2',      # Stereo audio (2 channels)
-            normalized_path
-        ]
-        
+
+    base_name = os.path.basename(video_file)
+    # Ensure output is always .mp4
+    base_name_no_ext = os.path.splitext(base_name)[0]
+    normalized_path = os.path.join(temp_dir, f"norm_{i}_{base_name_no_ext}.mp4")
+
+    # Normalize with loudnorm for consistent audio levels
+    # Using two-pass loudnorm would be ideal but single-pass is good enough
+    cmd = [
+        'ffmpeg',
+        '-y',
+        '-i', video_file,
+        '-vf', f'scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2',
+        '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',  # EBU R128 loudness normalization
+        '-r', str(target_fps),
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',
+        '-profile:v', 'baseline',
+        '-level', '3.0',
+        '-movflags', '+faststart',
+        '-preset', 'medium',
+        '-crf', '23',
+        '-c:a', 'aac',
+        '-b:a', '256k',
+        '-ar', '48000',
+        '-ac', '2',
+        normalized_path
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        logging.info(f"Normalized {video_file}")
+        return (i, normalized_path)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to normalize {video_file}: {e.stderr.decode() if e.stderr else str(e)}")
+        # Fallback without loudnorm
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            normalized_videos.append(normalized_path)
-            logging.info(f"Normalized {video_file} to {normalized_path}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to normalize {video_file}: {e.stderr.decode() if e.stderr else str(e)}")
-            # If normalization fails, try a simpler approach with QuickTime compatibility
-            try:
-                simple_cmd = [
-                    'ffmpeg',
-                    '-y',
-                    '-i', video_file,
-                    '-c:v', 'libx264',
-                    '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
-                    '-profile:v', 'baseline',  # Use baseline profile for better compatibility
-                    '-level', '3.0',
-                    '-movflags', '+faststart',  # Optimize for streaming
-                    '-c:a', 'aac',
-                    '-b:a', '256k',  # Higher audio bitrate for better quality
-                    '-ar', '48000',  # Consistent audio sample rate
-                    '-ac', '2',      # Stereo audio (2 channels)
-                    normalized_path
-                ]
-                subprocess.run(simple_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                normalized_videos.append(normalized_path)
-                logging.info(f"Simple conversion of {video_file} to {normalized_path}")
-            except subprocess.CalledProcessError:
-                logging.warning(f"All normalization attempts failed for {video_file}, skipping")
-                continue
-    
-    return normalized_videos
+            simple_cmd = [
+                'ffmpeg',
+                '-y',
+                '-i', video_file,
+                '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',
+                '-profile:v', 'baseline',
+                '-level', '3.0',
+                '-movflags', '+faststart',
+                '-c:a', 'aac',
+                '-b:a', '256k',
+                '-ar', '48000',
+                '-ac', '2',
+                normalized_path
+            ]
+            subprocess.run(simple_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logging.info(f"Simple conversion of {video_file}")
+            return (i, normalized_path)
+        except subprocess.CalledProcessError:
+            logging.warning(f"All normalization attempts failed for {video_file}")
+            return (i, None)
+
+
+def normalize_videos(video_files, temp_dir):
+    """
+    Normalize videos to ensure they can be concatenated properly.
+    Uses parallel processing for faster execution.
+    Includes audio loudness normalization for consistent volume.
+    """
+    if not video_files:
+        return []
+
+    total = len(video_files)
+    results = [None] * total
+    completed = 0
+
+    print(f"\nNormalizing {total} video(s)...")
+
+    # Prepare arguments for parallel processing
+    args_list = [(i, video_file, temp_dir) for i, video_file in enumerate(video_files)]
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(normalize_single_video, args): args[0] for args in args_list}
+
+        for future in as_completed(futures):
+            idx, normalized_path = future.result()
+            results[idx] = normalized_path
+            completed += 1
+            print_progress(completed, total, prefix="Normalizing")
+
+    # Filter out None values (failed normalizations) while preserving order
+    return [path for path in results if path is not None]
 
 def add_transitions(videos, temp_dir):
     """
     Add visual fade transitions between videos.
-    Since all videos have been normalized with consistent audio settings,
-    we can safely add transitions without audio issues.
+    Shows progress during processing.
     """
     if len(videos) <= 1:
         return videos
-    
-    # Process each video to add fade in/out (video only)
+
+    total = len(videos)
     processed_videos = []
-    
+
+    print(f"\nAdding transitions to {total} video(s)...")
+
     for i, video in enumerate(videos):
-        # Get video duration
         duration_cmd = [
             'ffprobe',
             '-v', 'error',
@@ -215,92 +311,131 @@ def add_transitions(videos, temp_dir):
             '-of', 'csv=p=0',
             video
         ]
-        
+
         try:
             duration = float(subprocess.run(duration_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip())
-            
-            # Create a version with fade in/out
+
             fade_file = os.path.join(temp_dir, f"fade_{i}.mp4")
-            
-            # Add fade in at the beginning and fade out at the end
-            # Using fixed values instead of "outpoint" which was causing issues
+
             cmd = [
                 'ffmpeg',
                 '-y',
                 '-i', video,
                 '-vf', f'fade=t=in:st=0:d=0.5,fade=t=out:st={max(0, duration-0.5)}:d=0.5',
                 '-c:v', 'libx264',
-                '-pix_fmt', 'yuv420p',  # Ensure QuickTime compatibility
-                '-profile:v', 'baseline',  # Use baseline profile for better compatibility
+                '-pix_fmt', 'yuv420p',
+                '-profile:v', 'baseline',
                 '-level', '3.0',
-                '-movflags', '+faststart',  # Optimize for streaming
-                '-c:a', 'copy',  # Just copy the audio without modifying it
+                '-movflags', '+faststart',
+                '-c:a', 'copy',
                 fade_file
             ]
-            
+
             subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             processed_videos.append(fade_file)
-            logging.info(f"Added visual fade effects to video {i}")
+            logging.info(f"Added fade effects to video {i}")
         except (subprocess.CalledProcessError, ValueError) as e:
             logging.error(f"Failed to add fade effects: {str(e)}")
-            # If processing fails, use the original video
             processed_videos.append(video)
-    
+
+        print_progress(i + 1, total, prefix="Transitions")
+
     return processed_videos
 
-def process_videos(input_dir, output_dir, temp_dir, normalize=True):
+def process_videos(input_dir, output_dir, temp_dir, normalize=True, title_cards=True):
     """
     Process all videos in the input directory, grouping them by teacher
     and concatenating them into single videos in the output directory.
     """
-    # Create output and temp directories if they don't exist
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(temp_dir, exist_ok=True)
-    
-    # Group videos by teacher
+
+    # Group videos by teacher, keeping track of student names
     teacher_videos = defaultdict(list)
-    
+
     for filename in os.listdir(input_dir):
         if is_video_file(filename):
             filepath = os.path.join(input_dir, filename)
             teacher_name, student_name = parse_filename(filename)
-            
+
             if teacher_name:
-                teacher_videos[teacher_name].append(filepath)
+                teacher_videos[teacher_name].append((filepath, student_name))
                 logging.info(f"Added video for {teacher_name} from {student_name}")
             else:
                 logging.warning(f"Skipping {filename} - doesn't match expected format")
-    
+
     # Process each teacher's videos
     results = []
-    for teacher_name, videos in teacher_videos.items():
-        logging.info(f"Processing {len(videos)} videos for {teacher_name}")
-        
-        # Sort videos alphabetically by filename (which includes student name)
-        videos.sort(key=lambda x: os.path.basename(x))
-        
+    total_teachers = len(teacher_videos)
+
+    for teacher_idx, (teacher_name, video_tuples) in enumerate(teacher_videos.items(), 1):
+        print(f"\n{'='*60}")
+        print(f"Processing teacher {teacher_idx}/{total_teachers}: {format_teacher_name(teacher_name)}")
+        print(f"{'='*60}")
+
+        # Sort by student name
+        video_tuples.sort(key=lambda x: x[1])
+        videos = [v[0] for v in video_tuples]
+        student_names = [v[1] for v in video_tuples]
+
         # Normalize videos if requested
         if normalize:
             processed_videos = normalize_videos(videos, temp_dir)
         else:
             processed_videos = videos
-        
-        # Add transitions between videos (faster method)
+
+        # Add transitions
         videos_with_transitions = add_transitions(processed_videos, temp_dir)
-        
+
+        # Add title cards if requested
+        final_video_list = []
+        if title_cards and videos_with_transitions:
+            print(f"\nCreating title cards...")
+
+            # Create teacher intro card
+            teacher_display = format_teacher_name(teacher_name)
+            intro_card = os.path.join(temp_dir, f"intro_{teacher_name}.mp4")
+            intro_result = create_title_card(
+                f"For {teacher_display}",
+                intro_card,
+                duration=3.0,
+                font_size=56
+            )
+            if intro_result:
+                final_video_list.append(intro_result)
+
+            # Add student name cards before each video
+            for idx, (video, student_name) in enumerate(zip(videos_with_transitions, student_names)):
+                student_display = format_student_name(student_name)
+                student_card = os.path.join(temp_dir, f"card_{teacher_name}_{idx}.mp4")
+                card_result = create_title_card(
+                    f"From: {student_display}",
+                    student_card,
+                    duration=1.5,
+                    font_size=44
+                )
+                if card_result:
+                    final_video_list.append(card_result)
+                final_video_list.append(video)
+
+            print_progress(len(student_names), len(student_names), prefix="Title cards")
+        else:
+            final_video_list = videos_with_transitions
+
         # Create output filename
         output_file = os.path.join(output_dir, f"{teacher_name}_appreciation.mp4")
-        
+
         # Concatenate videos
-        success = concatenate_videos(videos_with_transitions, output_file, temp_dir)
-        
+        print(f"\nConcatenating final video...")
+        success = concatenate_videos(final_video_list, output_file, temp_dir)
+
         if success:
             results.append({
                 'teacher': teacher_name,
                 'video_count': len(videos),
                 'output_file': output_file
             })
-    
+
     return results
 
 def cleanup(temp_dir):
@@ -315,22 +450,36 @@ def main():
     parser.add_argument('--output', '-o', required=True, help='Directory for output videos')
     parser.add_argument('--temp', '-t', default='./temp', help='Directory for temporary files')
     parser.add_argument('--no-normalize', action='store_true', help='Skip video normalization')
+    parser.add_argument('--no-title-cards', action='store_true', help='Skip title cards')
     parser.add_argument('--keep-temp', action='store_true', help='Keep temporary files')
-    
+
     args = parser.parse_args()
-    
+
+    print("\n" + "="*60)
+    print("  Teacher Appreciation Video Splicing Tool")
+    print("="*60)
+
     logging.info("Starting video processing")
     logging.info(f"Input directory: {args.input}")
     logging.info(f"Output directory: {args.output}")
-    
-    results = process_videos(args.input, args.output, args.temp, normalize=not args.no_normalize)
-    
+
+    results = process_videos(
+        args.input,
+        args.output,
+        args.temp,
+        normalize=not args.no_normalize,
+        title_cards=not args.no_title_cards
+    )
+
     # Print summary
-    print("\nProcessing complete!")
-    print(f"Processed videos for {len(results)} teachers:")
+    print("\n" + "="*60)
+    print("  Processing Complete!")
+    print("="*60)
+    print(f"\nProcessed videos for {len(results)} teacher(s):")
     for result in results:
-        print(f"  - {result['teacher']}: {result['video_count']} videos -> {result['output_file']}")
-    
+        teacher_display = format_teacher_name(result['teacher'])
+        print(f"  - {teacher_display}: {result['video_count']} videos -> {result['output_file']}")
+
     if not args.keep_temp:
         cleanup(args.temp)
 
